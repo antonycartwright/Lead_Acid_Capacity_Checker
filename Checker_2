@@ -1,0 +1,273 @@
+//Include I2C LCD libraries.
+#include <Wire.h>
+#include <LiquidCrystal_I2C.h>
+
+//Define the pins.
+#define mosfetPin 2
+#define goPin 3
+#define stopPin 4
+#define batteryVoltagePin A0
+
+//LCD Library for I2C
+LiquidCrystal_I2C lcd(0x27, 16, 2);
+
+//Is the load currently supposed to be running?
+bool runLoad = false;
+
+//Last time a poll occured.
+long lastMillisPoll = 0;
+
+//Last time a LCD was updated.
+long lastMillisLCD = 0;
+
+//Last known pin states.
+bool goPinLastState = HIGH;
+bool stopPinLastState = HIGH;
+
+//System voltage - Needed for the ADC calulation.
+const float systemVoltage = 5.01; //Enter system voltage here.
+
+//This only gets set once. Voltage per count.
+float vpc = systemVoltage / 1024;
+
+//The ratio of the resistors matters, it's used to scale up to correct voltage.
+const float voltageDivider1 = 9.66; //Put R1 resistance here.
+const float voltageDivider2 = 4.95; //Put R2 resistance here.
+
+//Knowing the resistor restances, we can calculate the 'multiplier'.
+float multiplier = (voltageDivider1 + voltageDivider2) / voltageDivider2;
+
+//The load resistance. This needs to be accurate.
+const float loadResistance = 7.51; //Put R3 and fan equivalent resistance here.
+
+//Amp polls are done approx 1 time per second and aren't reset. Temporary values are here.
+float ampSecondsSum = 0; //Sum is the sum of the samples.
+int ampSecondsCount = 0; //Count is the amount of samples taken.
+
+//Voltage polls are done approx 10 times per second, then reset. Temporary values are here.
+float batteryVoltageSum = 0; //Sum is the sum of the samples.
+int batteryVoltageCount = 0; //Count is the amount of samples taken.
+float batteryVoltageAvg = 0;
+
+//Time this drain started.
+long millisStarted = 0;
+
+//Time last input was detected.
+long lastInput = 0;
+
+//Last LCD on state.
+bool LCDOn = true;
+
+//Reverse protection diode drop voltage.
+const float diodeDrop = 0.30;
+
+void setup() {
+  // put your setup code here, to run once:
+  Serial.begin(115200);
+
+  //Set the min modes for the 4 pins.
+  pinMode(mosfetPin, OUTPUT);
+  pinMode(goPin, INPUT_PULLUP);
+  pinMode(stopPin, INPUT_PULLUP);
+  pinMode(batteryVoltagePin, INPUT);
+
+  lcd.init(); //Initialise the LCD.
+
+  LCDBackgroundOn(true); //Turn the LCD backlight on.
+
+  //lcd.setCursor(0, 0);
+  //lcd.print("Starting Up!");
+
+  lcd.setCursor(0, 0);
+  lcd.print("Press to start!");
+
+  //Let's see the start voltage to start with.
+  int counts = analogRead(batteryVoltagePin);
+  float voltageIn = counts * vpc; //Get the read in voltage.
+
+  lcd.setCursor(10, 1);
+  lcd.print(String(voltageIn * multiplier + 0.30) + "V"); //Print the voltage to the LCD.
+}
+
+void LCDBackgroundOn(bool on) {
+  if (on) {
+    lcd.backlight();
+  } else {
+    lcd.noBacklight();
+  }
+  LCDOn = on;
+  Serial.println("Backlight: " + on);
+}
+
+void RestartLoad() {
+  Serial.println("Go!");
+
+  //Reset counters
+  millisStarted = 0;
+  ampSecondsSum = 0;
+  ampSecondsCount = 0;
+
+  //Set the run flag.
+  runLoad = true;
+
+  //Clear LCD.
+  lcd.clear();
+
+  //Write the mosfet HIGH.
+  digitalWrite(mosfetPin, HIGH);
+
+  //Log start time.
+  millisStarted = millis();
+
+  Serial.println("Mosfet High!");
+}
+
+void StopLoad() {
+  Serial.println("Stop!");
+
+  //Set the run flag.
+  runLoad = false;
+
+  //Write the mosfet LOW.
+  digitalWrite(mosfetPin, LOW);
+
+  //Millis started should be 0 as it hasn't started.
+  millisStarted = 0;
+}
+
+void loop() {
+  // put your main code here, to run repeatedly:
+
+  long millisNow = millis(); //Get the current time now.
+
+  //If time now is greater than the last input add 30 seconds, then turn backlight off...
+  if (millisNow > lastInput + 30000) {
+    LCDBackgroundOn(false);
+  }
+
+  //Find out if go/stop has been pressed.
+  bool goPressed = (digitalRead(goPin) != goPinLastState) && digitalRead(goPin) == LOW;
+  goPinLastState = digitalRead(goPin);
+  bool stopPressed = (digitalRead(stopPin) != stopPinLastState) && digitalRead(stopPin) == LOW;
+  stopPinLastState = digitalRead(stopPin);
+
+  //If the go or stop pins have been pressed:
+  if (goPressed || stopPressed)
+  {
+    //If the LCD is not on:
+    if (!LCDOn) {
+      //Turn the LCD on and ignore the input.
+      //The first input is to wake the device up.
+      LCDBackgroundOn(true);
+    } else {
+      //A button has been pressed and the backlight is already on.
+      if (goPressed)
+      {
+        //Go is pressed.
+        if (runLoad == false)
+        {
+          //Load isn't running.
+          //If the light is on, and go is pressed, then we restart the load.
+          RestartLoad();
+        }
+      }
+
+      if (stopPressed)
+      {
+        //Stop is pressed.
+        if (runLoad == true)
+        {
+          //Load is running.
+          //If the light is on, and stop is pressed, then we stop the load.
+          StopLoad();
+        }
+      }
+    }
+
+    //Record last time something was pressed.
+    lastInput = millisNow;
+  }
+
+  if (runLoad) {
+    //If the run flag says yes:
+
+    if (millisNow >= lastMillisPoll + 100) {
+      //Battery Voltage samples taken every 100ms.
+
+      int counts = analogRead(batteryVoltagePin); //Read A0 counts.
+      float voltageIn = counts * vpc; //Calculate voltage in.
+      Serial.println("Voltage In: " + String(voltageIn));
+
+      batteryVoltageSum += (voltageIn * multiplier + 0.30); //Add to the summed battery voltage.
+      batteryVoltageCount++; //Add 1 to the sample count.
+
+      //Record last sample time.
+      lastMillisPoll = millisNow;
+    }
+
+    if (millisNow >= lastMillisLCD + 1000) {
+      //LCD and Amps calcs performed every 1000ms.
+
+      //Get seconds since started running load and convert to HH:mm:SS.
+      long seconds = ((millisNow - millisStarted) / 1000);
+      long minutes = seconds / 60;
+      seconds -= minutes * 60;
+      long hours = minutes / 60;
+      minutes -= hours * 60;
+
+      char duration[9];
+      sprintf(duration, "%02ld:%02ld:%02ld", hours, minutes, seconds);
+
+      Serial.println("Duration: " + String(duration));
+
+      //Top left print duration.
+      lcd.setCursor(0, 0);
+      lcd.print(duration);
+
+      //Average (mean) battery voltage.
+      batteryVoltageAvg = batteryVoltageSum / batteryVoltageCount;
+
+      //After the averages are taken, reset the voltage counters for the next second.
+      batteryVoltageSum = 0;
+      batteryVoltageCount = 0;
+
+      //Top right print batteryVoltageAvg.
+      lcd.setCursor(10, 1);
+      lcd.print(String(batteryVoltageAvg) + "V");
+
+      //Calculate amperage. V/R=A.
+      float amperage = batteryVoltageAvg / loadResistance;
+      Serial.println("Amperage: " + String(amperage));
+
+      //Bottom left print current amperage.
+      lcd.setCursor(0, 1);
+      lcd.print(String(amperage) + "A");
+
+      //As well as showing the spot Amp load check, we also store it for the AH calcs as well as the per-second sample count.
+      ampSecondsSum += amperage;
+      Serial.println("ampSecondsSum: " + String(ampSecondsSum));
+      ampSecondsCount++;
+      Serial.println("ampSecondsCount: " + String(ampSecondsCount));
+
+      //An Amp-hour is equal to 3600 Amp-seconds.
+      String ampHours = String(ampSecondsSum / 3600) + "Ah";
+
+      Serial.println("Ah: " + ampHours);
+
+      //Display this on the top right of the LCD.
+      lcd.setCursor(16 - ampHours.length(), 0);
+      lcd.print(ampHours);
+
+      //Save last LCD update. We also do the amps calc once a second but it's only necessary to record either/or.
+      lastMillisLCD = millisNow;
+    }
+
+    //If at any point, the battery drops to 12v, it has become discharged. Stop the test!
+    if (batteryVoltageAvg < 12) {
+      StopLoad();
+      Serial.println("Battery Discharged!");
+    }
+  }
+
+  delay(1);
+}
