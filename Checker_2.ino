@@ -6,6 +6,8 @@
 //Part 2: https://www.youtube.com/watch?v=EUuwX6P-pak
 
 //The code and hardware has changed a little. This code is better, more efficient, tidier and commented out better.
+//It also accounts for an anti-reverse diode. I accidentally reverse-connected the device and blew the LCD and the mosfet.
+//In my hardware, I haven't actually fitted the diode properly. I'll show you that in the next viudeo hopefully. The board needs a redesign.
 
 //This project is code for a battery drainer. It applies a load of a known resistance to a battery and monitors it's performance. Therefore, we can work out its acapacity accurately.
 
